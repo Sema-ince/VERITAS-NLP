@@ -209,3 +209,4 @@ __marimo__/
 # Data Folders
 data/raw/*
 !data/raw/.gitkeep
+data/processed/*
