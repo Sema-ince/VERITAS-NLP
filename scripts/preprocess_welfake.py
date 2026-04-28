@@ -1,56 +1,18 @@
 import pandas as pd
 import os
-import re
-import nltk
-from nltk.corpus import stopwords
-from nltk.stem import WordNetLemmatizer
+import sys
 from tqdm import tqdm
+
+# src dizinini import edebilmek için sys.path eklentisi
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
+from src.nlp.preprocess import setup_nltk, get_lemmatizer_and_stopwords, clean_text
 
 # Etkileşimli (interaktif) projelere tqdm progress bar desteği
 tqdm.pandas()
-
-def setup_nltk():
-    """NLTK kütüphanesi için gerekli veri dosyalarını indirir."""
-    print("NLTK veri dosyaları kontrol ediliyor/indiriliyor...")
-    nltk.download('punkt', quiet=True)
-    nltk.download('stopwords', quiet=True)
-    nltk.download('wordnet', quiet=True)
-    # Punkt tokenizer ve kelime ağını kullanabilmek için ek veriler bazı sürümlerde gerekebilir:
-    nltk.download('punkt_tab', quiet=True)
-    nltk.download('omw-1.4', quiet=True)
-    print("NLTK dosyaları hazır.\n")
-
-def clean_text(text, lemmatizer, stop_words):
-    """
-    Metin NLP ön işleme adımları (Lemmatization ile):
-    1. Lowercase (Küçük harfe çevirme)
-    2. Noktalama, özel karakterler ve sayıları kaldırma (Sadece harfler kalsın)
-    3. Tokenization (Kelime kelime ayırma)
-    4. Stopwords kaldırma
-    5. Lemmatize (Kök/Gövde bulma)
-    """
-    # Eksik/Boş veriler için güvenlik kontrolü
-    if pd.isna(text):
-        return ""
-    
-    # 1. Küçük harf
-    text = str(text).lower()
-    
-    # 2. Noktalama, rakam ve özel karakterleri atma (Sadece a-z arası kalır)
-    text = re.sub(r'[^a-z\s]', ' ', text)
-    
-    # 3. Fazla boşlukları temizleme
-    text = re.sub(r'\s+', ' ', text).strip()
-    
-    # Boş kalırsa hemen dönelim
-    if not text:
-        return ""
-    
-    # Tokenization & Stopwords & Lemmatization aynı döngüde performans için
-    tokens = text.split()
-    cleaned_tokens = [lemmatizer.lemmatize(word) for word in tokens if word not in stop_words]
-    
-    return ' '.join(cleaned_tokens)
 
 def main():
     print("="*50)
@@ -97,9 +59,7 @@ def main():
     print("\nAdım 3: Metin Ön İşleme (Temizleme & Lemmatization) Uygulanıyor...")
     print("Bu işlem satır sayısına bağlı olarak birkaç dakika sürebilir (Örn: 72.000 satır). Lütfen bekleyin...")
     
-    lemmatizer = WordNetLemmatizer()
-    # İngilizce stop words listesini alıp daha hızlı arama için set'e dönüştürüyoruz
-    stop_words = set(stopwords.words('english'))
+    lemmatizer, stop_words = get_lemmatizer_and_stopwords()
     
     # progress_apply (tqdm.pandas üzerinden gelir) sadece apply'ın ilerleme çubuklu halidir
     df['content'] = df['content'].progress_apply(lambda x: clean_text(x, lemmatizer, stop_words))

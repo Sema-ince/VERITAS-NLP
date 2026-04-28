@@ -1,6 +1,26 @@
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
+import os
+import sys
+
+# src modülünü import edebilmek için yolu ekliyoruz
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
+from src.nlp.preprocess import setup_nltk, get_lemmatizer_and_stopwords, clean_text
+from src.nlp.vectorize import BertVectorizer
+
+# Modellerin ve NLTK'nın her etkileşimde yeniden yüklenmemesi için cache kullanıyoruz
+@st.cache_resource
+def load_nlp_components():
+    setup_nltk()
+    lemmatizer, stop_words = get_lemmatizer_and_stopwords()
+    vectorizer = BertVectorizer()
+    return lemmatizer, stop_words, vectorizer
+
+lemmatizer, stop_words, vectorizer = load_nlp_components()
 
 # 1. Sayfa Ayarları ve Sekme Başlığı
 st.set_page_config(page_title="VERITAS-NLP", page_icon="📰", layout="wide")
@@ -37,10 +57,22 @@ if sayfa == "Metin Girişi (Analiz)":
         haber_metni = st.text_area("Haber Metni:", height=200, placeholder="Haber metnini buraya yapıştırın...")
         if st.button("Metni Analiz Et"):
             if haber_metni:
-                st.success("Metin alındı! (Arka planda Ahmet'in modeli buraya bağlanacak)")
+                st.success("Metin alındı! İşleniyor...")
+                
+                with st.spinner("Metin temizleniyor ve vektörleştiriliyor..."):
+                    cleaned = clean_text(haber_metni, lemmatizer, stop_words)
+                    output = vectorizer.vectorize(cleaned)
+                    
+                    st.markdown("**1. Temizlenmiş Metin (Ön İşleme):**")
+                    st.info(cleaned[:300] + ("..." if len(cleaned) > 300 else ""))
+                    
+                    st.markdown("**2. Model Girdisi (Vektör Formu):**")
+                    st.code(f"Input Shape: {output['input_ids'].shape}\nAttention Mask Shape: {output['attention_mask'].shape}")
+                    
+                    st.success("Modelin anlayacağı formata başarıyla dönüştürüldü! (Arka planda Ahmet'in modeli buraya bağlanacak)")
             else:
                 st.warning("Lütfen analiz etmek için bir metin girin!")
-                
+
     with tab2:
         # Link girme kutusu
         haber_linki = st.text_input("Haber Linki (URL):", placeholder="Örn: https://www.hurriyet.com.tr/...")
@@ -60,7 +92,6 @@ if sayfa == "Metin Girişi (Analiz)":
                         paragraflar = soup.find_all('p')
                         cekilen_metin = " ".join([p.text for p in paragraflar])
                         
-                        # 4. Eğer anlamlı bir metin bulabildiysek ekrana yazdırıyoruz
                         if len(cekilen_metin) > 100:
                             st.success("Haber metni başarıyla çekildi!")
                             
@@ -68,7 +99,14 @@ if sayfa == "Metin Girişi (Analiz)":
                             # Ekranda çok yer kaplamaması için ilk 500 karakteri gösteriyoruz
                             st.info(cekilen_metin[:500] + " ... (Devamı var)") 
                             
-                            st.write("*(İşte bu çekilen tam metin arka planda Ahmet'in modeline yollanacak!)*")
+                            with st.spinner("Çekilen metin NLP boru hattından geçiriliyor..."):
+                                cleaned = clean_text(cekilen_metin, lemmatizer, stop_words)
+                                output = vectorizer.vectorize(cleaned)
+                                
+                                st.markdown("**İşlenmiş Veri Modeli Girdisi:**")
+                                st.code(f"Input Shape: {output['input_ids'].shape}\nİlk 10 Token: {output['input_ids'][0][:10].tolist()}")
+                            
+                            st.write("*(İşte bu vektör formatı arka planda Ahmet'in modeline yollanacak!)*")
                         else:
                             st.warning("Bu linkten yeterli metin çekilemedi. Sitenin yapısı farklı olabilir, başka bir haber linki deneyin.")
                             
