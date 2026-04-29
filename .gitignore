@@ -210,3 +210,7 @@ __marimo__/
 data/raw/*
 !data/raw/.gitkeep
 data/processed/*
+
+# Models
+models/saved/*
+!models/saved/.gitkeep
