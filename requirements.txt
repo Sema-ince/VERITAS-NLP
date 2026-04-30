@@ -1,3 +1,20 @@
+# === Veri İşleme (Sinan) ===
 pandas
 nltk
 tqdm
+
+# === Arayüz (Sema) ===
+streamlit
+requests
+beautifulsoup4
+
+# === Makine Öğrenmesi - Baseline (Ahmet) ===
+scikit-learn
+
+# === Derin Öğrenme - BERT & Bi-LSTM (Ahmet) ===
+torch
+transformers
+
+# === XAI - Açıklanabilir Yapay Zekâ (Ahmet) ===
+lime
+numpy
