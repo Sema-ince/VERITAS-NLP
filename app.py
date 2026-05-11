@@ -21,14 +21,41 @@ except ImportError:
 # ==========================================
 # 📌 1. KISIM: AHMET'İN MODELLERİ (YÜKLEME)
 # ==========================================
-@st.cache_resource # Modelin her sayfada baştan yüklenmesini engeller (Hızlandırır)
-def modeli_yukle():
-    # TODO: Ahmet'in modeli buraya gelecek. Örnek:
-    # model = tf.keras.models.load_model('veritas_bilstm_model.h5')
-    # return model
-    return "MOCK_MODEL" # Şimdilik taklit model dönüyoruz
+import torch
+from scripts.train_bilstm import BiLSTMClassifier
 
-yapay_zeka_modeli = modeli_yukle()
+@st.cache_resource
+def load_bilstm():
+    path = "models/saved/bilstm_model.pt"
+    if not os.path.exists(path):
+        return None, None
+    checkpoint = torch.load(path, map_location='cpu')
+    hp = checkpoint['hyperparameters']
+    model = BiLSTMClassifier(hp['vocab_size'], hp['embedding_dim'], hp['hidden_size'], hp['num_layers'], hp['dropout'])
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
+    return model, checkpoint['vocab_word2idx']
+
+@st.cache_resource
+def load_bert():
+    from scripts.train_bert import BertClassifier
+    from transformers import BertTokenizer
+    path = "models/saved/bert_model.pt"
+    if not os.path.exists(path):
+        return None, None
+    
+    checkpoint = torch.load(path, map_location='cpu')
+    model_name = checkpoint.get('model_name', "bert-base-multilingual-cased")
+    dropout = checkpoint.get('dropout', 0.3)
+    
+    tokenizer = BertTokenizer.from_pretrained(model_name)
+    model = BertClassifier(model_name, dropout)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
+    return model, tokenizer
+
+bilstm_model, bilstm_vocab = load_bilstm()
+bert_model, bert_tokenizer = load_bert()
 
 # =============================================================
 # TAHMİN FONKSİYONLARI
