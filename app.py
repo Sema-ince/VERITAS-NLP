@@ -62,9 +62,47 @@ def load_bert_model():
 # TAHMİN FONKSİYONLARI
 # =============================================================
 
+def detect_language(text):
+    """Metnin dilini basit bir sezgisel yöntemle algılar."""
+    # Türkçeye özgü karakterler
+    turkish_chars = set('çşğüöıÇŞĞÜÖİ')
+    text_chars = set(text)
+    if text_chars & turkish_chars:
+        return 'tr'
+    
+    # Türkçeye özgü yaygın kelimeler
+    turkish_words = {'bir', 've', 'ile', 'olan', 'için', 'bu', 'da', 'de',
+                     'den', 'dan', 'olarak', 'ise', 'gibi', 'daha', 'sonra',
+                     'kadar', 'gore', 'icin', 'ile', 'hem', 'ama', 'ancak',
+                     'yarin', 'bugun', 'haber', 'haberi', 'acikladi', 'soyledi',
+                     'turkiye', 'istanbul', 'ankara', 'devlet', 'bakani',
+                     'cumhurbaskani', 'hukumet', 'basvurun', 'vatandaslarina',
+                     'dagitacagini', 'buyudu', 'oraninda', 'kuruldu', 'ilinin',
+                     'beylik', 'devleti', 'imparatorlugu', 'fethedip', 'vererek'}
+    words = set(text.lower().split())
+    turkish_match = len(words & turkish_words)
+    if turkish_match >= 2:
+        return 'tr'
+    
+    return 'en'
+
+def preprocess_text_for_bilstm(text):
+    """Metni Bi-LSTM modeli için ön işler (eğitimdeki gibi, birleşik pipeline)."""
+    import re
+    if not text:
+        return ""
+    # Küçük harf
+    text = text.lower()
+    # Sadece harfleri koru (İngilizce + Türkçe)
+    text = re.sub(r'[^a-zçşğüöı\s]', ' ', text)
+    # Fazla boşlukları temizle
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
 def predict_with_bilstm(text, model, vocab, max_seq_len=256):
     """Bi-LSTM modeli ile tahmin yapar."""
     device = next(model.parameters()).device
+    text = preprocess_text_for_bilstm(text)
     tokens = text.split()
     encoded = [vocab.get(word, 1) for word in tokens]
     
@@ -76,7 +114,7 @@ def predict_with_bilstm(text, model, vocab, max_seq_len=256):
     tensor = torch.tensor([encoded], dtype=torch.long).to(device)
     
     with torch.no_grad():
-        output = model(tensor).cpu().item()
+        output = model(tensor, apply_sigmoid=True).cpu().item()
     
     return output  # 0'a yakın = Real, 1'e yakın = Fake
 
@@ -84,7 +122,7 @@ def predict_with_bert(text, model, tokenizer, max_length=128):
     """BERT modeli ile tahmin yapar."""
     device = next(model.parameters()).device
     
-    encoding = tokenizer.encode_plus(
+    encoding = tokenizer(
         text,
         add_special_tokens=True,
         max_length=max_length,
@@ -198,10 +236,17 @@ if sayfa == "Metin Girişi (Analiz)":
                     st.markdown("---")
                     st.subheader("📊 Analiz Sonuçları")
                     
+                    # Dil algılama
+                    detected_lang = detect_language(haber_metni)
+                    if detected_lang == 'tr':
+                        st.info("🌐 **Dil Algılama:** Türkçe metin tespit edildi. BERT Multilingual modeli Türkçe için optimize edilmiştir ve birincil referans olarak kullanılmalıdır.")
+                    
                     # Bi-LSTM ile tahmin
                     if bilstm_model:
                         score = predict_with_bilstm(haber_metni, bilstm_model, bilstm_vocab)
                         show_result(score, "Bi-LSTM")
+                        if detected_lang == 'tr':
+                            st.caption("⚠️ _Not: Bi-LSTM modeli ağırlıklı olarak İngilizce veri seti ile eğitilmiştir. Türkçe metinlerde BERT sonuçlarını referans alınız._")
                     
                     # BERT ile tahmin
                     if bert_model:

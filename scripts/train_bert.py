@@ -23,7 +23,7 @@ from sklearn.metrics import classification_report, accuracy_score
 # =============================================================
 # 1. AYARLAR (Hyperparameters) - Literatür Taramasından Alındı
 # =============================================================
-MODEL_NAME = "dbmdz/bert-base-turkish-cased"  # Literatür: bert-base-turkish-cased
+MODEL_NAME = "bert-base-multilingual-cased"  # Multilingual: 104 dil (TR + EN + daha fazlası)
 MAX_LENGTH = 128          # Token uzunluğu (Literatür: 128 veya 256)
 DROPOUT = 0.3             # (Literatür: 0.3)
 
@@ -33,6 +33,7 @@ LEARNING_RATE = 2e-5      # (Literatür: 2e-5 civarı)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# info to number
 # =============================================================
 # 2. VERİ SETİ SINIFI (BERT için özel)
 # =============================================================
@@ -57,7 +58,7 @@ class BertNewsDataset(Dataset):
         # BERT Tokenizer: Metni BERT'in anlayacağı formata çevirir
         # - input_ids: Kelimelerin sayısal karşılıkları
         # - attention_mask: Gerçek kelime mi yoksa padding mi? (1=gerçek, 0=padding)
-        encoding = self.tokenizer.encode_plus(
+        encoding = self.tokenizer(
             text,
             add_special_tokens=True,       # [CLS] ve [SEP] tokenlarını ekle
             max_length=self.max_length,
@@ -73,6 +74,7 @@ class BertNewsDataset(Dataset):
             'label': torch.tensor(label, dtype=torch.float)
         }
 
+# two part 1.lang 2.under to 0=> bel,1=>lay
 # =============================================================
 # 3. BERT SINIFLANDIRMA MODELİ
 # =============================================================
@@ -115,7 +117,7 @@ class BertClassifier(nn.Module):
         output = self.fc(output)
         output = self.sigmoid(output)
         return output.squeeze(1)
-
+#explain
 # =============================================================
 # 4. EĞİTİM FONKSİYONU
 # =============================================================
@@ -153,7 +155,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scheduler):
     avg_loss = total_loss / len(dataloader)
     accuracy = accuracy_score(all_labels, all_preds)
     return avg_loss, accuracy
-
+#text exam
 # =============================================================
 # 5. TEST/DEĞERLENDİRME FONKSİYONU
 # =============================================================
@@ -180,7 +182,7 @@ def evaluate(model, dataloader, criterion):
     avg_loss = total_loss / len(dataloader)
     accuracy = accuracy_score(all_labels, all_preds)
     return avg_loss, accuracy, all_preds, all_labels
-
+#manage
 # =============================================================
 # 6. ANA FONKSİYON
 # =============================================================
@@ -192,7 +194,10 @@ def main():
     print(f"📦 Kullanılan model: {MODEL_NAME}")
     
     # --- Veri Yükleme ---
-    file_path = os.path.join("data", "processed", "WELFake_cleaned.csv")
+    # Önce birleşik veri setini ara, yoksa sadece İngilizce veriyi kullan
+    file_path = os.path.join("data", "processed", "combined_dataset.csv")
+    if not os.path.exists(file_path):
+        file_path = os.path.join("data", "processed", "WELFake_cleaned.csv")
     
     if not os.path.exists(file_path):
         print(f"\n❌ HATA: Temizlenmiş veri seti bulunamadı -> {file_path}")
