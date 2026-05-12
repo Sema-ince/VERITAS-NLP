@@ -36,8 +36,8 @@ def clean_text(text, lemmatizer, stop_words):
     # 1. Küçük harf
     text = str(text).lower()
     
-    # 2. Noktalama, rakam ve özel karakterleri atma (Sadece a-z arası kalır)
-    text = re.sub(r'[^a-z\s]', ' ', text)
+    # 2. Noktalama, rakam ve özel karakterleri atma (Türkçe + İngilizce harfler kalır)
+    text = re.sub(r'[^a-zçşğüöı\s]', ' ', text)
     
     # 3. Fazla boşlukları temizleme
     text = re.sub(r'\s+', ' ', text).strip()

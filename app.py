@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import time
-import random
+
 import feedparser # RSS için gerekli (pip install feedparser)
 
 # Ahmet'in yazdığı XAI (Açıklanabilirlik) fonksiyonlarını arayüze dahil ediyoruz
@@ -29,12 +29,17 @@ def load_bilstm():
     path = "models/saved/bilstm_model.pt"
     if not os.path.exists(path):
         return None, None
-    checkpoint = torch.load(path, map_location='cpu')
-    hp = checkpoint['hyperparameters']
-    model = BiLSTMClassifier(hp['vocab_size'], hp['embedding_dim'], hp['hidden_size'], hp['num_layers'], hp['dropout'])
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.eval()
-    return model, checkpoint['vocab_word2idx']
+    try:
+        # إجبار التحميل على المعالج لضمان عدم استهلاك VRAM إضافي
+        checkpoint = torch.load(path, map_location=torch.device('cpu'), weights_only=False)
+        hp = checkpoint['hyperparameters']
+        model = BiLSTMClassifier(hp['vocab_size'], hp['embedding_dim'], hp['hidden_size'], hp['num_layers'], hp['dropout'])
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.eval()
+        return model, checkpoint['vocab_word2idx']
+    except Exception as e:
+        st.error(f"⚠️ Bi-LSTM yükleme hatası: {e}")
+        return None, None
 
 @st.cache_resource
 def load_bert():
@@ -43,16 +48,19 @@ def load_bert():
     path = "models/saved/bert_model.pt"
     if not os.path.exists(path):
         return None, None
-    
-    checkpoint = torch.load(path, map_location='cpu')
-    model_name = checkpoint.get('model_name', "bert-base-multilingual-cased")
-    dropout = checkpoint.get('dropout', 0.3)
-    
-    tokenizer = BertTokenizer.from_pretrained(model_name)
-    model = BertClassifier(model_name, dropout)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.eval()
-    return model, tokenizer
+    try:
+        checkpoint = torch.load(path, map_location=torch.device('cpu'), weights_only=False)
+        model_name = checkpoint.get('model_name', "bert-base-multilingual-cased")
+        dropout = checkpoint.get('dropout', 0.3)
+        
+        tokenizer = BertTokenizer.from_pretrained(model_name)
+        model = BertClassifier(model_name, dropout)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.eval()
+        return model, tokenizer
+    except Exception as e:
+        st.error(f"⚠️ BERT yükleme hatası: {e}")
+        return None, None
 
 bilstm_model, bilstm_vocab = load_bilstm()
 bert_model, bert_tokenizer = load_bert()
@@ -120,7 +128,7 @@ def predict_with_bilstm(text, model, vocab, max_seq_len=256):
 def predict_with_bert(text, model, tokenizer, max_length=128):
     """BERT modeli ile tahmin yapar."""
     device = next(model.parameters()).device
-    
+
     encoding = tokenizer(
         text,
         add_special_tokens=True,
@@ -130,14 +138,32 @@ def predict_with_bert(text, model, tokenizer, max_length=128):
         return_attention_mask=True,
         return_tensors='pt'
     )
-    
+
     input_ids = encoding['input_ids'].to(device)
     attention_mask = encoding['attention_mask'].to(device)
-    
+
     with torch.no_grad():
-        output = model(input_ids, attention_mask).cpu().item()
-    
+        logit = model(input_ids, attention_mask)
+        output = torch.sigmoid(logit).cpu().item()
+
     return output  # 0'a yakın = Real, 1'e yakın = Fake
+
+def predict_ensemble(text):
+    """İki modeli birleştirerek daha iyi tahmin yapar (Weighted Ensemble)."""
+    bilstm_score = predict_with_bilstm(text, bilstm_model, bilstm_vocab) if bilstm_model else None
+    bert_score = predict_with_bert(text, bert_model, bert_tokenizer) if bert_model else None
+
+    if bilstm_score is None and bert_score is None:
+        return None
+    if bilstm_score is None:
+        return bert_score
+    if bert_score is None:
+        return bilstm_score
+
+    # BERT daha başarılı olduğu için (75% vs 55%) daha yüksek ağırlık
+    bert_weight = 0.65
+    bilstm_weight = 0.35
+    return bert_weight * bert_score + bilstm_weight * bilstm_score
 
 # =============================================================
 # SONUÇ GÖSTERME FONKSİYONU
@@ -162,49 +188,79 @@ def show_xai_explanation(text, predict_fn):
     with st.spinner("🔍 Model kararı açıklanıyor (XAI analizi)..."):
         result = explain_prediction(text, predict_fn, num_features=10, num_samples=300)
         summary, details = format_explanation_for_display(result)
+        
+        # Sonuçları ekranda göster
+        st.subheader("🧠 Model Bu Kararı Neden Verdi? (XAI Analizi)")
+        st.write(summary)
+        if details:
+            import pandas as pd
+            st.dataframe(pd.DataFrame(details), use_container_width=True)
 
 def haber_analiz_et(metin):
-        # Şimdilik rastgele bir sahtelik oranı üretiyoruz (Mock)
-        sahtelik_orani = random.randint(10, 95) 
-        
-        # 3. MADDENİN ÇÖZÜMÜ: Yüzdelik Oranın Görselleştirilmesi
-        st.subheader("📊 Analiz Sonucu")
-        
-        # İki kolon oluşturup görseli zenginleştiriyoruz
-        col1, col2 = st.columns([1, 3])
-        
-        with col1:
-            st.metric(label="Sahte Olma İhtimali", value=f"%{sahtelik_orani}")
-            
-        with col2:
-            # Orana göre bar çubuğunun rengini belirliyoruz
-            if sahtelik_orani > 70:
-                st.error("Bu haberin SAHTE (Dezenformasyon) olma ihtimali çok yüksek!")
-                st.progress(sahtelik_orani)
-            elif sahtelik_orani > 40:
-                st.warning("Bu haber ŞÜPHELİ. Dikkatli yaklaşılmalı.")
-                st.progress(sahtelik_orani)
-            else:
-                st.success("Bu haber büyük ihtimalle GERÇEK.")
-                st.progress(sahtelik_orani)
-        
-        st.write("---")
-        
-        # 4. MADDENİN ÇÖZÜMÜ: XAI (Açıklanabilir Yapay Zeka) Görselleştirmesi
-        st.subheader("🧠 Model Bu Kararı Neden Verdi? (XAI Analizi)")
-        st.write("Modelin kararını etkileyen anahtar kelimeler aşağıda vurgulanmıştır:")
-        
-        # XAI Taklit Çıktısı (Ahmet SHAP/LIME entegre edince bu html yapısına kelimeleri gönderecek)
-        # Kırmızı: Sahteliği artıranlar, Yeşil: Gerçekliği artıranlar
-        xai_ornek_cikti = f"""
-        <div style="padding:10px; border-radius:5px; background-color:#1e1e1e; line-height: 2;">
-            Bu haberdeki <span style="background-color:#ff4b4b; color:white; padding:3px; border-radius:3px;">şok edici</span> 
-            iddialara göre yetkililer <span style="background-color:#4baf4b; color:white; padding:3px; border-radius:3px;">resmi bir açıklama</span> 
-            yapmaktan kaçındı. Olayın <span style="background-color:#ff4b4b; color:white; padding:3px; border-radius:3px;">gizli belgeleri</span> 
-            sızdırıldı.
-        </div>
-        """
-        st.markdown(xai_ornek_cikti, unsafe_allow_html=True)
+    """URL ve RSS'ten gelen haberleri gerçek modellerle analiz eder."""
+    # Model kontrolü
+    models_available = (bilstm_model is not None) or (bert_model is not None)
+
+    if not models_available:
+        st.warning("⚠️ Henüz eğitilmiş model bulunamadı. Lütfen önce modelleri eğitin.")
+        return
+
+    st.markdown("---")
+    st.subheader("📊 Analiz Sonuçları")
+
+    # Dil algılama
+    detected_lang = detect_language(metin)
+    if detected_lang == 'tr':
+        st.info("🌐 **Dil Algılama:** Türkçe metin tespit edildi.")
+
+    # Ensemble (her iki model varsa)
+    if bilstm_model is not None and bert_model is not None:
+        st.markdown("**🤖 Ensemble Prediction (İki Modelin Birleşimi):**")
+        ensemble_score = predict_ensemble(metin)
+        if ensemble_score is not None:
+            is_fake, conf = show_result(ensemble_score, "ENSEMBLE")
+
+            # Bireysel model sonuçları
+            st.markdown("---")
+            st.markdown("**📊 Bireysel Model Sonuçları:**")
+            col1, col2 = st.columns(2)
+
+            with col1:
+                bilstm_score = predict_with_bilstm(metin, bilstm_model, bilstm_vocab)
+                show_result(bilstm_score, "Bi-LSTM")
+
+            with col2:
+                bert_score = predict_with_bert(metin, bert_model, bert_tokenizer)
+                show_result(bert_score, "BERT")
+
+        # XAI açıklaması
+        if XAI_HAZIR:
+            st.markdown("---")
+            from scripts.xai_explainer import create_bert_predictor
+            device = next(bert_model.parameters()).device
+            predict_fn = create_bert_predictor(bert_model, bert_tokenizer, 128, device)
+            show_xai_explanation(metin, predict_fn)
+
+    # Sadece bir model varsa
+    elif bert_model is not None:
+        score = predict_with_bert(metin, bert_model, bert_tokenizer)
+        is_fake, conf = show_result(score, "BERT")
+
+        if XAI_HAZIR:
+            from scripts.xai_explainer import create_bert_predictor
+            device = next(bert_model.parameters()).device
+            predict_fn = create_bert_predictor(bert_model, bert_tokenizer, 128, device)
+            show_xai_explanation(metin, predict_fn)
+
+    elif bilstm_model is not None:
+        score = predict_with_bilstm(metin, bilstm_model, bilstm_vocab)
+        show_result(score, "Bi-LSTM")
+
+        if XAI_HAZIR:
+            from scripts.xai_explainer import create_bilstm_predictor
+            device = next(bilstm_model.parameters()).device
+            predict_fn = create_bilstm_predictor(bilstm_model, bilstm_vocab, 256, device)
+            show_xai_explanation(metin, predict_fn)
 
 # ==========================================
 # 📌 3. KISIM: ARAYÜZ VE SAYFA TASARIMI
@@ -245,33 +301,58 @@ if sayfa == "Metin Girişi (Analiz)":
                 else:
                     st.markdown("---")
                     st.subheader("📊 Analiz Sonuçları")
-                    
+
                     # Dil algılama
                     detected_lang = detect_language(haber_metni)
                     if detected_lang == 'tr':
-                        st.info("🌐 **Dil Algılama:** Türkçe metin tespit edildi. BERT Multilingual modeli Türkçe için optimize edilmiştir.")
-                    
-                    # Bi-LSTM ile tahmin
-                    if 'bilstm_model' in globals() and bilstm_model:
-                        score = predict_with_bilstm(haber_metni, bilstm_model, bilstm_vocab)
-                        show_result(score, "Bi-LSTM")
-                    
-                    # BERT ile tahmin
-                    if 'bert_model' in globals() and bert_model:
-                        score = predict_with_bert(haber_metni, bert_model, bert_tokenizer)
-                        is_fake, conf = show_result(score, "BERT")
-                        
+                        st.info("🌐 **Dil Algılama:** Türkçe metin tespit edildi.")
+
+                    # Ensemble kullan (her iki model varsa)
+                    if 'bilstm_model' in globals() and bilstm_model and 'bert_model' in globals() and bert_model:
+                        st.markdown("**🤖 Ensemble Prediction (İki Modelin Birleşimi):**")
+                        ensemble_score = predict_ensemble(haber_metni)
+                        if ensemble_score is not None:
+                            is_fake, conf = show_result(ensemble_score, "ENSEMBLE")
+
+                            st.markdown("---")
+                            st.markdown("**📊 Bireysel Model Sonuçları:**")
+                            col1, col2 = st.columns(2)
+
+                            with col1:
+                                score = predict_with_bilstm(haber_metni, bilstm_model, bilstm_vocab)
+                                show_result(score, "Bi-LSTM")
+
+                            with col2:
+                                score = predict_with_bert(haber_metni, bert_model, bert_tokenizer)
+                                show_result(score, "BERT")
+
                         # XAI
+                        st.markdown("---")
                         from scripts.xai_explainer import create_bert_predictor
                         device = next(bert_model.parameters()).device
                         predict_fn = create_bert_predictor(bert_model, bert_tokenizer, 128, device)
                         show_xai_explanation(haber_metni, predict_fn)
-                    
-                    elif 'bilstm_model' in globals() and bilstm_model:
-                        from scripts.xai_explainer import create_bilstm_predictor
-                        device = next(bilstm_model.parameters()).device
-                        predict_fn = create_bilstm_predictor(bilstm_model, bilstm_vocab, 256, device)
-                        show_xai_explanation(haber_metni, predict_fn)
+
+                    else:
+                        # Sadece bir model varsa
+                        if 'bert_model' in globals() and bert_model:
+                            score = predict_with_bert(haber_metni, bert_model, bert_tokenizer)
+                            is_fake, conf = show_result(score, "BERT")
+
+                            # XAI
+                            from scripts.xai_explainer import create_bert_predictor
+                            device = next(bert_model.parameters()).device
+                            predict_fn = create_bert_predictor(bert_model, bert_tokenizer, 128, device)
+                            show_xai_explanation(haber_metni, predict_fn)
+
+                        elif 'bilstm_model' in globals() and bilstm_model:
+                            score = predict_with_bilstm(haber_metni, bilstm_model, bilstm_vocab)
+                            show_result(score, "Bi-LSTM")
+
+                            from scripts.xai_explainer import create_bilstm_predictor
+                            device = next(bilstm_model.parameters()).device
+                            predict_fn = create_bilstm_predictor(bilstm_model, bilstm_vocab, 256, device)
+                            show_xai_explanation(haber_metni, predict_fn)
             else:
                 st.warning("Lütfen analiz etmek için anlamlı bir metin (en az 50 karakter) girin!")
                 
@@ -297,7 +378,7 @@ if sayfa == "Metin Girişi (Analiz)":
             else:
                 st.warning("Lütfen bir haber linki girin!")
 
-# 3. MODÜL: RSS AKIŞI
+    # 3. MODÜL: RSS AKIŞI
     with tab3:
         st.info("Güvenilir kaynaklardan (Örn: TRT Haber, NTV) canlı haber akışı sağlanıyor.")
         

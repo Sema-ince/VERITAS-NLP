@@ -80,7 +80,8 @@ def create_bert_predictor(model, tokenizer, max_length, device):
                 input_ids = encoding['input_ids'].to(device)
                 attention_mask = encoding['attention_mask'].to(device)
                 
-                output = model(input_ids, attention_mask).cpu().item()
+                output = model(input_ids, attention_mask)
+                output = torch.sigmoid(output).cpu().item()
                 results.append([1 - output, output])
         
         return np.array(results)

@@ -24,15 +24,15 @@ import re
 # =============================================================
 # 1. PARAMETRELER
 # =============================================================
-EMBEDDING_DIM = 128
-HIDDEN_SIZE = 128
-NUM_LAYERS = 2
+EMBEDDING_DIM = 256
+HIDDEN_SIZE = 512
+NUM_LAYERS = 4
 DROPOUT = 0.5
 MAX_VOCAB_SIZE = 30000
 MAX_SEQ_LEN = 256
 
 BATCH_SIZE = 64
-EPOCHS = 10               # ✅ ISLAH: 3 -> 10
+EPOCHS = 10               
 LEARNING_RATE = 1e-3
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -166,7 +166,7 @@ def main():
     print(f"[Data] Veri yukleniyor: {file_path}")
     df = pd.read_csv(file_path).dropna(subset=['content', 'label'])
     
-    # Turkce veri dengeleme (Oversampling 4x)
+    # Turkce veri dengeleme (Dinamik Oversampling)
     print("[Process] Dil tespiti ve dengeleme yapiliyor...")
     if 'language' not in df.columns:
         df['language'] = df['content'].apply(lambda x: 'tr' if re.search(r'[çşğüöı]', str(x).lower()) else 'en')
@@ -175,9 +175,20 @@ def main():
     en_data = df[df['language'] == 'en']
     print(f"   - Orijinal: EN={len(en_data):,}, TR={len(tr_data):,}")
     
-    tr_oversampled = pd.concat([tr_data] * 4, ignore_index=True)
-    df = pd.concat([en_data, tr_oversampled]).sample(frac=1).reset_index(drop=True)
+    # Dinamik oversampling: Turkce veriyi Ingilizce seviyesine cikart
+    if len(tr_data) > 0 and len(en_data) > 0:
+        oversample_ratio = max(1, len(en_data) // len(tr_data))
+        # Cok fazla oversampling'i sinirla (max 10x)
+        oversample_ratio = min(oversample_ratio, 10)
+        tr_oversampled = pd.concat([tr_data] * oversample_ratio, ignore_index=True)
+        df = pd.concat([en_data, tr_oversampled]).sample(frac=1, random_state=42).reset_index(drop=True)
+        print(f"   - Oversampling orani: {oversample_ratio}x")
     print(f"   - Dengeli Toplam: {len(df):,}")
+    
+    # Label dagilimini kontrol et
+    num_total_fake = int(df['label'].sum())
+    num_total_real = len(df) - num_total_fake
+    print(f"   - Label dagilimi: Real={num_total_real:,}, Fake={num_total_fake:,}")
 
     # Veri Bolme
     X_train, X_test, y_train, y_test = train_test_split(df['content'].tolist(), df['label'].tolist(), test_size=0.2, stratify=df['label'], random_state=42)
@@ -193,15 +204,28 @@ def main():
     # Model & Loss
     model = BiLSTMClassifier(len(vocab.word2idx), EMBEDDING_DIM, HIDDEN_SIZE, NUM_LAYERS, DROPOUT).to(DEVICE)
     
+    # pos_weight hesapla - eger siniflar dengeli ise 1.0 yakininda olmali
     num_fake = sum(y_train)
     num_real = len(y_train) - num_fake
-    pos_weight = torch.tensor([num_real / num_fake], dtype=torch.float).to(DEVICE)
+    pos_weight_val = num_real / max(num_fake, 1)
+    print(f"   - Egitim seti: Real={num_real:,}, Fake={num_fake:,}, pos_weight={pos_weight_val:.2f}")
     
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    # Eger siniflar zaten dengeli ise pos_weight kullanma (bias'i onle)
+    if 0.8 <= pos_weight_val <= 1.2:
+        print("   - Siniflar dengeli, pos_weight kullanilmiyor (BCEWithLogitsLoss)")
+        criterion = nn.BCEWithLogitsLoss()
+    else:
+        pos_weight = torch.tensor([pos_weight_val], dtype=torch.float).to(DEVICE)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     
-    print("\n[Start] Egitim dongusu basladi...")
+    # Early Stopping ayarlari
+    PATIENCE = 3
     best_acc = 0
+    patience_counter = 0
+    
+    print("\n[Start] Egitim dongusu basladi...")
     for epoch in range(EPOCHS):
         t_loss, t_acc = train_one_epoch(model, train_loader, criterion, optimizer, epoch)
         v_loss, v_acc = evaluate(model, test_loader, criterion)
@@ -210,6 +234,7 @@ def main():
         
         if v_acc > best_acc:
             best_acc = v_acc
+            patience_counter = 0
             save_path = os.path.join("models", "saved", "bilstm_model.pt")
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             torch.save({
@@ -218,6 +243,12 @@ def main():
                 'hyperparameters': {'embedding_dim': EMBEDDING_DIM, 'hidden_size': HIDDEN_SIZE, 'num_layers': NUM_LAYERS, 'dropout': DROPOUT, 'max_seq_len': MAX_SEQ_LEN, 'vocab_size': len(vocab.word2idx)}
             }, save_path)
             print(f"   [Save] En iyi model kaydedildi! (Acc: %{v_acc*100:.2f})")
+        else:
+            patience_counter += 1
+            print(f"   [Early Stopping] Iyilesme yok ({patience_counter}/{PATIENCE})")
+            if patience_counter >= PATIENCE:
+                print(f"   [Early Stopping] {PATIENCE} epoch boyunca iyilesme olmadi, egitim durduruluyor.")
+                break
 
     print("\n" + "="*60)
     print(f" ✅ TAM EGITIM TAMAMLANDI! En iyi dogruluk: %{best_acc*100:.2f}")
