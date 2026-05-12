@@ -220,19 +220,6 @@ def haber_analiz_et(metin):
         if ensemble_score is not None:
             is_fake, conf = show_result(ensemble_score, "ENSEMBLE")
 
-            # Bireysel model sonuçları
-            st.markdown("---")
-            st.markdown("**📊 Bireysel Model Sonuçları:**")
-            col1, col2 = st.columns(2)
-
-            with col1:
-                bilstm_score = predict_with_bilstm(metin, bilstm_model, bilstm_vocab)
-                show_result(bilstm_score, "Bi-LSTM")
-
-            with col2:
-                bert_score = predict_with_bert(metin, bert_model, bert_tokenizer)
-                show_result(bert_score, "BERT")
-
         # XAI açıklaması
         if XAI_HAZIR:
             st.markdown("---")
@@ -313,18 +300,6 @@ if sayfa == "Metin Girişi (Analiz)":
                         ensemble_score = predict_ensemble(haber_metni)
                         if ensemble_score is not None:
                             is_fake, conf = show_result(ensemble_score, "ENSEMBLE")
-
-                            st.markdown("---")
-                            st.markdown("**📊 Bireysel Model Sonuçları:**")
-                            col1, col2 = st.columns(2)
-
-                            with col1:
-                                score = predict_with_bilstm(haber_metni, bilstm_model, bilstm_vocab)
-                                show_result(score, "Bi-LSTM")
-
-                            with col2:
-                                score = predict_with_bert(haber_metni, bert_model, bert_tokenizer)
-                                show_result(score, "BERT")
 
                         # XAI
                         st.markdown("---")
