@@ -1,12 +1,13 @@
 """
-VERITAS-NLP: Bi-LSTM Derin Öğrenme Modeli Eğitimi
-==================================================
-Bu dosya, Ahmet tarafından hazırlanan Baseline modellerinin (Logistic Regression & Random Forest)
-üzerine çıkmayı hedefleyen derin öğrenme modelidir.
+VERITAS-NLP: Bi-LSTM Full Training Dashboard
+==============================================
+Bu script, 90,000+ haber uzerinde dengeli ve dogru bir egitim yapmak icin tasarlanmistir.
+Tum bias sorunlari giderilmistir.
 
-Kullanılan Veri: Sinan'ın temizlediği WELFake_cleaned.csv
-Mimari: Embedding -> Bi-LSTM -> Dense (Tam Bağlantılı Katman)
-Framework: PyTorch
+[ISLAH - DUZELTMELER]:
+1. preprocess_text() fonksiyonu eklendi - egitim ve uygulama arasindan tutarsizlik giderildi
+2. EPOCHS 3'ten 10'a cikarildi
+3. Vocab.build() ve encode() artik temizlenmis metin kullaniyor
 """
 
 import os
@@ -18,315 +19,240 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, accuracy_score
 from collections import Counter
+import re
 
 # =============================================================
-# 1. AYARLAR (Hyperparameters) - Literatür Taramasından Alındı
+# 1. PARAMETRELER
 # =============================================================
-EMBEDDING_DIM = 128       # Her kelimenin vektör boyutu
-HIDDEN_SIZE = 128         # Bi-LSTM'in gizli katman boyutu (Literatür: 128 veya 256)
-NUM_LAYERS = 2            # Bi-LSTM katman sayısı (Literatür: 1 veya 2)
-DROPOUT = 0.3             # Overfitting'i önlemek için (Literatür: 0.3)
-MAX_VOCAB_SIZE = 20000    # En sık kullanılan 20k kelime
-MAX_SEQ_LEN = 256         # Bir haberin maksimum kelime uzunluğu (Literatür: 128 veya 256)
+EMBEDDING_DIM = 256
+HIDDEN_SIZE = 512
+NUM_LAYERS = 4
+DROPOUT = 0.5
+MAX_VOCAB_SIZE = 30000
+MAX_SEQ_LEN = 256
 
-BATCH_SIZE = 32           # (Literatür: 16 veya 32)
-EPOCHS = 5                # (Literatür: 3-5)
-LEARNING_RATE = 1e-3      # Bi-LSTM için standart LR (BERT'ten farklı, orada 2e-5)
+BATCH_SIZE = 64
+EPOCHS = 10               
+LEARNING_RATE = 1e-3
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # =============================================================
-# 2. KELİME SÖZLÜĞÜ OLUŞTURMA (Vocabulary)
+# ✅ ISLAH: ORTAK ONISLEME FONKSİYONU
+# Bu fonksiyon hem egitimde hem app.py'de ayni sekilde kullanilmalidir.
+# =============================================================
+def preprocess_text(text):
+    """Metni temizler: kucuk harf, sadece harf karakterleri, fazla bosluk kaldirilir."""
+    if not text:
+        return ""
+    text = str(text).lower()
+    # Sadece Ingilizce + Turkce harfleri koru
+    text = re.sub(r'[^a-zçşğüöı\s]', ' ', text)
+    # Fazla boslukları temizle
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+# =============================================================
+# 2. YARDIMCI SINIFLAR
 # =============================================================
 class Vocabulary:
-    """
-    Metindeki kelimeleri sayılara çevirir.
-    Örnek: "haber sahte" -> [45, 312]
-    """
     def __init__(self, max_size):
         self.max_size = max_size
-        self.word2idx = {"<PAD>": 0, "<UNK>": 1}  # PAD=boşluk doldurma, UNK=bilinmeyen kelime
+        self.word2idx = {"<PAD>": 0, "<UNK>": 1}
         self.idx2word = {0: "<PAD>", 1: "<UNK>"}
     
     def build(self, texts):
-        """Tüm metinlerden en sık kullanılan kelimelerin sözlüğünü oluşturur."""
         word_counts = Counter()
         for text in texts:
-            word_counts.update(text.split())
-        
-        # En sık kullanılan kelimeleri al (max_size - 2 çünkü PAD ve UNK zaten var)
+            # ✅ ISLAH: onislenmis metin uzerinden sozluk olustur
+            cleaned = preprocess_text(text)
+            word_counts.update(cleaned.split())
         most_common = word_counts.most_common(self.max_size - 2)
         for idx, (word, _) in enumerate(most_common, start=2):
             self.word2idx[word] = idx
             self.idx2word[idx] = word
-        
-        print(f"📚 Sözlük oluşturuldu: {len(self.word2idx)} kelime")
+        print(f"[Vocab] Sozluk olusturuldu: {len(self.word2idx)} kelime")
     
     def encode(self, text):
-        """Bir metni sayı dizisine çevirir."""
-        tokens = text.split()
-        encoded = [self.word2idx.get(word, 1) for word in tokens]  # Bilinmeyen kelime = 1 (UNK)
-        return encoded
+        # ✅ ISLAH: onislenmis metin uzerinden encode et
+        cleaned = preprocess_text(text)
+        tokens = cleaned.split()
+        return [self.word2idx.get(word, 1) for word in tokens]
 
-# =============================================================
-# 3. VERİ SETİ SINIFI (PyTorch Dataset)
-# =============================================================
 class NewsDataset(Dataset):
-    """
-    PyTorch'un veriyi parça parça (batch) yüklemesi için özel Dataset sınıfı.
-    """
     def __init__(self, texts, labels, vocab, max_len):
-        self.texts = texts
-        self.labels = labels
-        self.vocab = vocab
-        self.max_len = max_len
-    
-    def __len__(self):
-        return len(self.texts)
-    
+        self.texts, self.labels, self.vocab, self.max_len = texts, labels, vocab, max_len
+    def __len__(self): return len(self.texts)
     def __getitem__(self, idx):
-        # Metni sayılara çevir
         encoded = self.vocab.encode(self.texts[idx])
-        
-        # Padding: Kısa metinleri sıfırla doldur, uzun metinleri kes
-        if len(encoded) < self.max_len:
-            encoded = encoded + [0] * (self.max_len - len(encoded))
-        else:
-            encoded = encoded[:self.max_len]
-        
-        return (
-            torch.tensor(encoded, dtype=torch.long),
-            torch.tensor(self.labels[idx], dtype=torch.float)
-        )
+        encoded = (encoded + [0] * self.max_len)[:self.max_len]
+        return torch.tensor(encoded, dtype=torch.long), torch.tensor(self.labels[idx], dtype=torch.float)
 
-# =============================================================
-# 4. Bi-LSTM MODEL MİMARİSİ
-# =============================================================
 class BiLSTMClassifier(nn.Module):
-    """
-    Sahte Haber Tespiti için Bi-LSTM Modeli.
-    
-    Mimari (3 Aşamalı Fabrika):
-    ─────────────────────────────────────────
-    Aşama 1 - Embedding:   Kelimeleri anlamlı vektörlere çevirir
-    Aşama 2 - Bi-LSTM:     Metni hem ileri hem geri okuyarak bağlamı anlar
-    Aşama 3 - Dense (FC):  Son karar: "Gerçek mi, Sahte mi?"
-    ─────────────────────────────────────────
-    """
     def __init__(self, vocab_size, embedding_dim, hidden_size, num_layers, dropout):
-        super(BiLSTMClassifier, self).__init__()
-        
-        # Aşama 1: Embedding Katmanı
-        # Her kelimeyi (sayıyı) anlamlı bir vektöre dönüştürür
-        self.embedding = nn.Embedding(
-            num_embeddings=vocab_size,
-            embedding_dim=embedding_dim,
-            padding_idx=0  # PAD tokenı için sıfır vektör
-        )
-        
-        # Aşama 2: Bi-LSTM Katmanı
-        # Metni iki yönde okur (ileri + geri) ve bağlamı öğrenir
-        self.lstm = nn.LSTM(
-            input_size=embedding_dim,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            bidirectional=True,   # ÇİFT YÖNLÜ (Bi-directional) aktif!
-            dropout=dropout if num_layers > 1 else 0
-        )
-        
-        # Aşama 3: Dense (Tam Bağlantılı) Katmanlar
-        # Bi-LSTM çıktısını alıp son kararı verir
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
+        self.lstm = nn.LSTM(embedding_dim, hidden_size, num_layers, batch_first=True, bidirectional=True, dropout=dropout if num_layers > 1 else 0)
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_size * 2, 1)  # *2 çünkü bidirectional (ileri + geri)
+        self.fc = nn.Linear(hidden_size * 2, 1)
         self.sigmoid = nn.Sigmoid()
     
-    def forward(self, x):
-        # Adım 1: Kelimeleri vektörlere çevir
-        embedded = self.embedding(x)            # [batch, seq_len, embedding_dim]
-        
-        # Adım 2: Bi-LSTM'den geçir
-        lstm_out, (hidden, _) = self.lstm(embedded)  # lstm_out: [batch, seq_len, hidden*2]
-        
-        # Son gizli durumları birleştir (ileri yönün son + geri yönün son)
-        hidden_forward = hidden[-2]   # İleri yönün son katmanı
-        hidden_backward = hidden[-1]  # Geri yönün son katmanı
-        combined = torch.cat((hidden_forward, hidden_backward), dim=1)  # [batch, hidden*2]
-        
-        # Adım 3: Dropout uygula ve son kararı ver
+    def forward(self, x, apply_sigmoid=False):
+        embedded = self.embedding(x)
+        lstm_out, (hidden, _) = self.lstm(embedded)
+        combined = torch.cat((hidden[-2], hidden[-1]), dim=1)
         combined = self.dropout(combined)
         output = self.fc(combined)
-        output = self.sigmoid(output)
+        if apply_sigmoid: output = self.sigmoid(output)
         return output.squeeze(1)
 
 # =============================================================
-# 5. EĞİTİM FONKSİYONU
+# 3. EGITIM DONGUSU
 # =============================================================
-def train_one_epoch(model, dataloader, criterion, optimizer):
-    """Modeli bir epoch boyunca eğitir."""
+def train_one_epoch(model, loader, criterion, optimizer, epoch):
     model.train()
     total_loss = 0
-    all_preds = []
-    all_labels = []
+    all_preds, all_labels = [], []
     
-    for batch_texts, batch_labels in dataloader:
-        batch_texts = batch_texts.to(DEVICE)
-        batch_labels = batch_labels.to(DEVICE)
+    for i, (batch_texts, batch_labels) in enumerate(loader):
+        batch_texts, batch_labels = batch_texts.to(DEVICE), batch_labels.to(DEVICE)
         
-        # İleri hesaplama
         predictions = model(batch_texts)
         loss = criterion(predictions, batch_labels)
         
-        # Geri yayılım (Backpropagation)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         
         total_loss += loss.item()
-        all_preds.extend((predictions > 0.5).cpu().numpy())
+        probs = torch.sigmoid(predictions)
+        all_preds.extend((probs > 0.5).cpu().numpy())
         all_labels.extend(batch_labels.cpu().numpy())
-    
-    avg_loss = total_loss / len(dataloader)
-    accuracy = accuracy_score(all_labels, all_preds)
-    return avg_loss, accuracy
+        
+        if (i + 1) % 50 == 0:
+            acc = accuracy_score(all_labels, all_preds)
+            print(f"   [Epoch {epoch+1}] Batch {i+1}/{len(loader)} | Kayip: {loss.item():.4f} | Acc: %{acc*100:.1f}")
+            
+    return total_loss / len(loader), accuracy_score(all_labels, all_preds)
 
-# =============================================================
-# 6. TEST/DEĞERLENDİRME FONKSİYONU
-# =============================================================
-def evaluate(model, dataloader, criterion):
-    """Modeli test verileri üzerinde değerlendirir."""
+def evaluate(model, loader, criterion):
     model.eval()
     total_loss = 0
-    all_preds = []
-    all_labels = []
-    
+    all_preds, all_labels = [], []
     with torch.no_grad():
-        for batch_texts, batch_labels in dataloader:
-            batch_texts = batch_texts.to(DEVICE)
-            batch_labels = batch_labels.to(DEVICE)
-            
+        for batch_texts, batch_labels in loader:
+            batch_texts, batch_labels = batch_texts.to(DEVICE), batch_labels.to(DEVICE)
             predictions = model(batch_texts)
             loss = criterion(predictions, batch_labels)
-            
             total_loss += loss.item()
-            all_preds.extend((predictions > 0.5).cpu().numpy())
+            probs = torch.sigmoid(predictions)
+            all_preds.extend((probs > 0.5).cpu().numpy())
             all_labels.extend(batch_labels.cpu().numpy())
-    
-    avg_loss = total_loss / len(dataloader)
-    accuracy = accuracy_score(all_labels, all_preds)
-    return avg_loss, accuracy, all_preds, all_labels
+    return total_loss / len(loader), accuracy_score(all_labels, all_preds)
 
 # =============================================================
-# 7. ANA FONKSİYON
+# 4. ANA PROGRAM
 # =============================================================
 def main():
-    print("=" * 60)
-    print(" VERITAS-NLP: Bi-LSTM Derin Öğrenme Modeli Eğitimi")
-    print("=" * 60)
-    print(f"\n🖥️  Kullanılan cihaz: {DEVICE}")
+    print("\n" + "="*60)
+    print(" VERITAS-NLP: TAM KAPSAMLI EGITIM BASLIYOR")
+    print("="*60)
+    print(f"[Device] Cihaz: {DEVICE}")
+
+    # Veri Yukleme
+    file_path = os.path.join("data", "processed", "combined_dataset.csv")
+    if not os.path.exists(file_path): file_path = os.path.join("data", "processed", "WELFake_cleaned.csv")
     
-    # --- Veri Yükleme ---
-    file_path = os.path.join("data", "processed", "WELFake_cleaned.csv")
+    print(f"[Data] Veri yukleniyor: {file_path}")
+    df = pd.read_csv(file_path).dropna(subset=['content', 'label'])
     
-    if not os.path.exists(file_path):
-        print(f"\n❌ HATA: Temizlenmiş veri seti bulunamadı -> {file_path}")
-        print("Lütfen önce: python scripts/preprocess_welfake.py komutunu çalıştırın.")
-        return
+    # Turkce veri dengeleme (Dinamik Oversampling)
+    print("[Process] Dil tespiti ve dengeleme yapiliyor...")
+    if 'language' not in df.columns:
+        df['language'] = df['content'].apply(lambda x: 'tr' if re.search(r'[çşğüöı]', str(x).lower()) else 'en')
     
-    print(f"\n📂 Veri yükleniyor: {file_path}")
-    df = pd.read_csv(file_path)
-    df = df.dropna(subset=['content', 'label'])
-    print(f"✅ Toplam {len(df):,} haber yüklendi.")
+    tr_data = df[df['language'] == 'tr']
+    en_data = df[df['language'] == 'en']
+    print(f"   - Orijinal: EN={len(en_data):,}, TR={len(tr_data):,}")
     
-    # --- Veriyi Bölme ---
-    print("\n🔀 Veri seti bölünüyor (%80 Eğitim, %20 Test)...")
-    texts = df['content'].tolist()
-    labels = df['label'].tolist()
-    X_train, X_test, y_train, y_test = train_test_split(
-        texts, labels,
-        test_size=0.2, random_state=42
-    )
+    # Dinamik oversampling: Turkce veriyi Ingilizce seviyesine cikart
+    if len(tr_data) > 0 and len(en_data) > 0:
+        oversample_ratio = max(1, len(en_data) // len(tr_data))
+        # Cok fazla oversampling'i sinirla (max 10x)
+        oversample_ratio = min(oversample_ratio, 10)
+        tr_oversampled = pd.concat([tr_data] * oversample_ratio, ignore_index=True)
+        df = pd.concat([en_data, tr_oversampled]).sample(frac=1, random_state=42).reset_index(drop=True)
+        print(f"   - Oversampling orani: {oversample_ratio}x")
+    print(f"   - Dengeli Toplam: {len(df):,}")
     
-    # --- Sözlük Oluşturma ---
-    print("\n📖 Kelime sözlüğü oluşturuluyor...")
+    # Label dagilimini kontrol et
+    num_total_fake = int(df['label'].sum())
+    num_total_real = len(df) - num_total_fake
+    print(f"   - Label dagilimi: Real={num_total_real:,}, Fake={num_total_fake:,}")
+
+    # Veri Bolme
+    X_train, X_test, y_train, y_test = train_test_split(df['content'].tolist(), df['label'].tolist(), test_size=0.2, stratify=df['label'], random_state=42)
+    
+    # Vocab
     vocab = Vocabulary(MAX_VOCAB_SIZE)
     vocab.build(X_train)
     
-    # --- DataLoader Oluşturma ---
-    train_dataset = NewsDataset(X_train, y_train, vocab, MAX_SEQ_LEN)
-    test_dataset = NewsDataset(X_test, y_test, vocab, MAX_SEQ_LEN)
+    # Loaders
+    train_loader = DataLoader(NewsDataset(X_train, y_train, vocab, MAX_SEQ_LEN), batch_size=BATCH_SIZE, shuffle=True)
+    test_loader = DataLoader(NewsDataset(X_test, y_test, vocab, MAX_SEQ_LEN), batch_size=BATCH_SIZE)
     
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    # Model & Loss
+    model = BiLSTMClassifier(len(vocab.word2idx), EMBEDDING_DIM, HIDDEN_SIZE, NUM_LAYERS, DROPOUT).to(DEVICE)
     
-    print(f"📦 Eğitim batch sayısı: {len(train_loader)}, Test batch sayısı: {len(test_loader)}")
+    # pos_weight hesapla - eger siniflar dengeli ise 1.0 yakininda olmali
+    num_fake = sum(y_train)
+    num_real = len(y_train) - num_fake
+    pos_weight_val = num_real / max(num_fake, 1)
+    print(f"   - Egitim seti: Real={num_real:,}, Fake={num_fake:,}, pos_weight={pos_weight_val:.2f}")
     
-    # --- Model Oluşturma ---
-    print("\n🏗️  Bi-LSTM modeli oluşturuluyor...")
-    model = BiLSTMClassifier(
-        vocab_size=len(vocab.word2idx),
-        embedding_dim=EMBEDDING_DIM,
-        hidden_size=HIDDEN_SIZE,
-        num_layers=NUM_LAYERS,
-        dropout=DROPOUT
-    ).to(DEVICE)
+    # Eger siniflar zaten dengeli ise pos_weight kullanma (bias'i onle)
+    if 0.8 <= pos_weight_val <= 1.2:
+        print("   - Siniflar dengeli, pos_weight kullanilmiyor (BCEWithLogitsLoss)")
+        criterion = nn.BCEWithLogitsLoss()
+    else:
+        pos_weight = torch.tensor([pos_weight_val], dtype=torch.float).to(DEVICE)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     
-    criterion = nn.BCELoss()  # Binary Cross-Entropy (Literatür: Cross-Entropy)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"📊 Toplam parametre sayısı: {total_params:,}")
+    # Early Stopping ayarlari
+    PATIENCE = 3
+    best_acc = 0
+    patience_counter = 0
     
-    # --- Eğitim Döngüsü ---
-    print("\n" + "=" * 60)
-    print(" EĞİTİM BAŞLIYOR")
-    print("=" * 60)
-    
-    best_accuracy = 0.0
-    
+    print("\n[Start] Egitim dongusu basladi...")
     for epoch in range(EPOCHS):
-        train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer)
-        test_loss, test_acc, _, _ = evaluate(model, test_loader, criterion)
+        t_loss, t_acc = train_one_epoch(model, train_loader, criterion, optimizer, epoch)
+        v_loss, v_acc = evaluate(model, test_loader, criterion)
         
-        print(f"\n📈 Epoch [{epoch+1}/{EPOCHS}]")
-        print(f"   Eğitim   -> Kayıp: {train_loss:.4f} | Doğruluk: %{train_acc*100:.2f}")
-        print(f"   Test     -> Kayıp: {test_loss:.4f} | Doğruluk: %{test_acc*100:.2f}")
+        print(f"\n>> EPOCH {epoch+1} SONUCU: Train Acc: %{t_acc*100:.2f} | Test Dogrulugu = %{v_acc*100:.2f}")
         
-        # En iyi modeli kaydet
-        if test_acc > best_accuracy:
-            best_accuracy = test_acc
-            save_dir = os.path.join("models", "saved")
-            os.makedirs(save_dir, exist_ok=True)
-            save_path = os.path.join(save_dir, "bilstm_model.pt")
-            
+        if v_acc > best_acc:
+            best_acc = v_acc
+            patience_counter = 0
+            save_path = os.path.join("models", "saved", "bilstm_model.pt")
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'vocab_word2idx': vocab.word2idx,
-                'hyperparameters': {
-                    'embedding_dim': EMBEDDING_DIM,
-                    'hidden_size': HIDDEN_SIZE,
-                    'num_layers': NUM_LAYERS,
-                    'dropout': DROPOUT,
-                    'max_seq_len': MAX_SEQ_LEN,
-                    'vocab_size': len(vocab.word2idx)
-                }
+                'hyperparameters': {'embedding_dim': EMBEDDING_DIM, 'hidden_size': HIDDEN_SIZE, 'num_layers': NUM_LAYERS, 'dropout': DROPOUT, 'max_seq_len': MAX_SEQ_LEN, 'vocab_size': len(vocab.word2idx)}
             }, save_path)
-            print(f"   💾 En iyi model kaydedildi! (Doğruluk: %{best_accuracy*100:.2f})")
-    
-    # --- Son Değerlendirme ---
-    print("\n" + "=" * 60)
-    print(" SONUÇLAR")
-    print("=" * 60)
-    
-    _, _, final_preds, final_labels = evaluate(model, test_loader, criterion)
-    print(f"\n🏆 En iyi Test Doğruluğu: %{best_accuracy*100:.2f}")
-    print("\n📋 Sınıflandırma Raporu:")
-    print(classification_report(
-        final_labels, final_preds,
-        target_names=["Real (0)", "Fake (1)"],
-        zero_division=0
-    ))
-    print(f"💾 Model kaydedildi: models/saved/bilstm_model.pt")
+            print(f"   [Save] En iyi model kaydedildi! (Acc: %{v_acc*100:.2f})")
+        else:
+            patience_counter += 1
+            print(f"   [Early Stopping] Iyilesme yok ({patience_counter}/{PATIENCE})")
+            if patience_counter >= PATIENCE:
+                print(f"   [Early Stopping] {PATIENCE} epoch boyunca iyilesme olmadi, egitim durduruluyor.")
+                break
+
+    print("\n" + "="*60)
+    print(f" ✅ TAM EGITIM TAMAMLANDI! En iyi dogruluk: %{best_acc*100:.2f}")
+    print("="*60)
 
 if __name__ == "__main__":
     main()

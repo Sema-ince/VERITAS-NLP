@@ -4,7 +4,6 @@ VERITAS-NLP: BERT Derin Öğrenme Modeli Eğitimi
 Bu dosya, Literatür Taramasında belirlenen BERT modelini eğitmek için hazırlanmıştır.
 
 Kullanılan Veri: Sinan'ın temizlediği WELFake_cleaned.csv
-Model: bert-base-turkish-cased (Literatür Taramasından)
 Framework: PyTorch + HuggingFace Transformers
 Optimizer: AdamW (Literatür: AdamW)
 Learning Rate: 2e-5 (Literatür: 2e-5 civarı)
@@ -23,7 +22,7 @@ from sklearn.metrics import classification_report, accuracy_score
 # =============================================================
 # 1. AYARLAR (Hyperparameters) - Literatür Taramasından Alındı
 # =============================================================
-MODEL_NAME = "dbmdz/bert-base-turkish-cased"  # Literatür: bert-base-turkish-cased
+MODEL_NAME = "bert-base-multilingual-cased"  # Multilingual: 104 dil (TR + EN + daha fazlası)
 MAX_LENGTH = 128          # Token uzunluğu (Literatür: 128 veya 256)
 DROPOUT = 0.3             # (Literatür: 0.3)
 
@@ -33,6 +32,7 @@ LEARNING_RATE = 2e-5      # (Literatür: 2e-5 civarı)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# info to number
 # =============================================================
 # 2. VERİ SETİ SINIFI (BERT için özel)
 # =============================================================
@@ -57,7 +57,7 @@ class BertNewsDataset(Dataset):
         # BERT Tokenizer: Metni BERT'in anlayacağı formata çevirir
         # - input_ids: Kelimelerin sayısal karşılıkları
         # - attention_mask: Gerçek kelime mi yoksa padding mi? (1=gerçek, 0=padding)
-        encoding = self.tokenizer.encode_plus(
+        encoding = self.tokenizer(
             text,
             add_special_tokens=True,       # [CLS] ve [SEP] tokenlarını ekle
             max_length=self.max_length,
@@ -73,6 +73,7 @@ class BertNewsDataset(Dataset):
             'label': torch.tensor(label, dtype=torch.float)
         }
 
+# two part 1.lang 2.under to 0=> bel,1=>lay
 # =============================================================
 # 3. BERT SINIFLANDIRMA MODELİ
 # =============================================================
@@ -113,9 +114,10 @@ class BertClassifier(nn.Module):
         # Dropout + Sınıflandırma
         output = self.dropout(pooled_output)
         output = self.fc(output)
-        output = self.sigmoid(output)
+        # NOT: sigmoid burada uygulanmıyor, BCEWithLogitsLoss içinde uygulanacak
+        # Tahmin sırasında sigmoid ayrıca uygulanmalıdır
         return output.squeeze(1)
-
+#explain
 # =============================================================
 # 4. EĞİTİM FONKSİYONU
 # =============================================================
@@ -131,9 +133,9 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scheduler):
         attention_mask = batch['attention_mask'].to(DEVICE)
         labels = batch['label'].to(DEVICE)
         
-        # İleri hesaplama
-        predictions = model(input_ids, attention_mask)
-        loss = criterion(predictions, labels)
+        # İleri hesaplama (logits - sigmoid uygulanmamış)
+        logits = model(input_ids, attention_mask)
+        loss = criterion(logits, labels)
         
         # Geri yayılım
         optimizer.zero_grad()
@@ -143,6 +145,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scheduler):
         scheduler.step()
         
         total_loss += loss.item()
+        predictions = torch.sigmoid(logits)  # Tahmin için sigmoid uygula
         all_preds.extend((predictions > 0.5).cpu().detach().numpy())
         all_labels.extend(labels.cpu().numpy())
         
@@ -153,7 +156,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scheduler):
     avg_loss = total_loss / len(dataloader)
     accuracy = accuracy_score(all_labels, all_preds)
     return avg_loss, accuracy
-
+#text exam
 # =============================================================
 # 5. TEST/DEĞERLENDİRME FONKSİYONU
 # =============================================================
@@ -170,17 +173,18 @@ def evaluate(model, dataloader, criterion):
             attention_mask = batch['attention_mask'].to(DEVICE)
             labels = batch['label'].to(DEVICE)
             
-            predictions = model(input_ids, attention_mask)
-            loss = criterion(predictions, labels)
+            logits = model(input_ids, attention_mask)
+            loss = criterion(logits, labels)
             
             total_loss += loss.item()
+            predictions = torch.sigmoid(logits)  # Tahmin için sigmoid uygula
             all_preds.extend((predictions > 0.5).cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
     
     avg_loss = total_loss / len(dataloader)
     accuracy = accuracy_score(all_labels, all_preds)
     return avg_loss, accuracy, all_preds, all_labels
-
+#manage
 # =============================================================
 # 6. ANA FONKSİYON
 # =============================================================
@@ -192,7 +196,10 @@ def main():
     print(f"📦 Kullanılan model: {MODEL_NAME}")
     
     # --- Veri Yükleme ---
-    file_path = os.path.join("data", "processed", "WELFake_cleaned.csv")
+    # Önce birleşik veri setini ara, yoksa sadece İngilizce veriyi kullan
+    file_path = os.path.join("data", "processed", "combined_dataset.csv")
+    if not os.path.exists(file_path):
+        file_path = os.path.join("data", "processed", "WELFake_cleaned.csv")
     
     if not os.path.exists(file_path):
         print(f"\n❌ HATA: Temizlenmiş veri seti bulunamadı -> {file_path}")
@@ -204,18 +211,33 @@ def main():
     df = df.dropna(subset=['content', 'label'])
     print(f"✅ Toplam {len(df):,} haber yüklendi.")
     
+    # --- Türkçe Veri Dengeleme (Oversampling) ---
+    import re as _re
+    if 'language' not in df.columns:
+        df['language'] = df['content'].apply(lambda x: 'tr' if _re.search(r'[çşğüöı]', str(x).lower()) else 'en')
+    
+    tr_data = df[df['language'] == 'tr']
+    en_data = df[df['language'] == 'en']
+    print(f"📊 Dil dağılımı: EN={len(en_data):,}, TR={len(tr_data):,}")
+    
+    if len(tr_data) > 0 and len(en_data) > 0:
+        oversample_ratio = max(1, min(len(en_data) // len(tr_data), 10))
+        tr_oversampled = pd.concat([tr_data] * oversample_ratio, ignore_index=True)
+        df = pd.concat([en_data, tr_oversampled]).sample(frac=1, random_state=42).reset_index(drop=True)
+        print(f"   Oversampling: {oversample_ratio}x, Dengeli toplam: {len(df):,}")
+    
     # --- BERT Tokenizer Yükleme ---
     print(f"\n🔤 BERT Tokenizer yükleniyor ({MODEL_NAME})...")
     tokenizer = BertTokenizer.from_pretrained(MODEL_NAME)
     print("✅ Tokenizer hazır.")
     
-    # --- Veriyi Bölme ---
+    # --- Veriyi Bölme (Stratified) ---
     print("\n🔀 Veri seti bölünüyor (%80 Eğitim, %20 Test)...")
     texts = df['content'].tolist()
     labels = df['label'].tolist()
     X_train, X_test, y_train, y_test = train_test_split(
         texts, labels,
-        test_size=0.2, random_state=42
+        test_size=0.2, stratify=labels, random_state=42
     )
     
     # --- DataLoader Oluşturma ---
@@ -231,8 +253,8 @@ def main():
     print(f"\n🏗️  BERT modeli oluşturuluyor ({MODEL_NAME})...")
     model = BertClassifier(MODEL_NAME, DROPOUT).to(DEVICE)
     
-    # Literatürden alınan ayarlar
-    criterion = nn.BCELoss()                              # Cross-Entropy
+    # Literatürden alınan ayarlar — BCEWithLogitsLoss kullanıyoruz (sigmoid model içinde değil)
+    criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(                        # Optimizer: AdamW
         model.parameters(), lr=LEARNING_RATE
     )

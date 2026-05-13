@@ -67,7 +67,7 @@ def create_bert_predictor(model, tokenizer, max_length, device):
         
         with torch.no_grad():
             for text in texts:
-                encoding = tokenizer.encode_plus(
+                encoding = tokenizer(
                     text,
                     add_special_tokens=True,
                     max_length=max_length,
@@ -80,7 +80,8 @@ def create_bert_predictor(model, tokenizer, max_length, device):
                 input_ids = encoding['input_ids'].to(device)
                 attention_mask = encoding['attention_mask'].to(device)
                 
-                output = model(input_ids, attention_mask).cpu().item()
+                output = model(input_ids, attention_mask)
+                output = torch.sigmoid(output).cpu().item()
                 results.append([1 - output, output])
         
         return np.array(results)
@@ -166,7 +167,7 @@ def format_explanation_for_display(explanation_result):
     pred_label = explanation_result['predicted_label']
     confidence = explanation_result['confidence']
     
-    summary = f"🔍 **Model Kararı:** {pred_label} (Güven: %{confidence})"
+    summary = f"**Model Kararı:** {pred_label} (Güven: %{confidence})"
     
     details = []
     for item in explanation_result['explanation']:
